@@ -1,8 +1,11 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template, redirect, url_for, session
 import pymysql
 
 
 from datetime import datetime, date, time,timedelta
+
+import json
+
 app = Flask(__name__)
 
 # MySQL Workbench connection config
@@ -13,6 +16,45 @@ db = pymysql.connect(
     database='yatrisimplified',
     cursorclass=pymysql.cursors.DictCursor
 )
+
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+
+@app.route('/show_routes', methods=['POST'])
+def show_routes():
+    source = request.form['source']
+    destination = request.form['destination']
+    travel_date = request.form['travel_date']
+
+    # Manually create a JSON-like dict
+    data = {
+        'source': source,
+        'destination': destination,
+        'travel_date': travel_date
+    }
+
+    # Simulate a request to get_multimodal_route
+    with app.test_request_context(json=data):
+        response = get_multimodal_route()
+        if isinstance(response, tuple):
+            response, status_code = response
+            if status_code != 200:
+                return render_template('show_routes.html', options=[], error=response.get_json().get("message"))
+        options = response.get_json().get("options", [])
+
+    return render_template('show_routes.html', options=options)
+
+
+@app.route('/confirm_route', methods=['POST'])
+def confirm_route():
+    route_json = request.form.get('route_data')
+    print("Raw JSON from form:", route_json)  # Debug print
+    route = json.loads(route_json)  # Should now work!
+    return render_template('confirm_booking.html', route=route)
+
 
 @app.route('/api/register', methods=['POST'])
 def register_user():
@@ -64,6 +106,14 @@ def update_profile(user_id):
     except Exception as e:
         print("Error:", e)
         return jsonify({'error': 'Profile update failed'}), 500
+
+
+import base64
+
+@app.template_filter('b64encode')
+def b64encode_filter(s):
+    return base64.b64encode(s.encode('utf-8')).decode('utf-8')
+
 
 @app.route('/add_train', methods=['POST'])
 def add_train():
@@ -526,7 +576,7 @@ def get_multimodal_route():
     data = request.get_json()
     source_name = data.get('source')
     destination_name = data.get('destination')
-    travel_date_str = data.get('travel_date')  # Expecting format: 'YYYY-MM-DD'
+    travel_date_str = data.get('travel_date')  # Format: 'YYYY-MM-DD'
 
     try:
         travel_date = datetime.strptime(travel_date_str, "%Y-%m-%d").date() if travel_date_str else datetime.today().date()
@@ -573,8 +623,14 @@ def get_multimodal_route():
             'bus_leg': {
                 'bus_number': route['bus_number'],
                 'bus_name': route['bus_name'],
-                'from': source['bus_station_code'],
-                'to': destination['bus_station_code'],
+                'from': {
+                    'station_code': source['bus_station_code'],
+                    'station_name': source['location_name']
+                },
+                'to': {
+                    'station_code': destination['bus_station_code'],
+                    'station_name': destination['location_name']
+                },
                 'departure_from_source': dep_datetime.isoformat(),
                 'arrival_at_source': datetime.combine(travel_date, arr_time).isoformat(),
                 'arrived_time': arr_datetime.isoformat()
@@ -604,6 +660,7 @@ def get_multimodal_route():
         if hub['location_name'] in [source_name, destination_name]:
             continue
 
+        # Get bus leg
         cursor.execute("""
             SELECT br1.*, br2.*, b.*
             FROM bus_routes br1
@@ -613,6 +670,7 @@ def get_multimodal_route():
         """, (source['bus_station_code'], hub['bus_station_code']))
         bus_leg = cursor.fetchone()
 
+        # Get train leg
         cursor.execute("""
             SELECT tr1.*, tr2.*, t.*
             FROM train_routes tr1
@@ -638,6 +696,7 @@ def get_multimodal_route():
 
         transfer_wait_minutes = int((train_departure_dt - bus_arrival_dt).total_seconds() / 60)
 
+        # Fares
         cursor.execute("""
             SELECT fare FROM fares 
             WHERE mode = 'bus' AND from_station_code = %s AND to_station_code = %s
@@ -653,7 +712,6 @@ def get_multimodal_route():
         train_fare = float(train_fare_row['fare']) if train_fare_row else 0.0
 
         total_fare = bus_fare + train_fare
-
         final_arrived_time = ensure_time(train_leg.get('arrived_time'))
         final_arrival_dt = datetime.combine(travel_date, final_arrived_time)
 
@@ -666,8 +724,14 @@ def get_multimodal_route():
             'bus_leg': {
                 'bus_number': bus_leg['bus_number'],
                 'bus_name': bus_leg['bus_name'],
-                'from': source['bus_station_code'],
-                'to': hub['bus_station_code'],
+                'from': {
+                    'station_code': source['bus_station_code'],
+                    'station_name': source['location_name']
+                },
+                'to': {
+                    'station_code': hub['bus_station_code'],
+                    'station_name': hub['location_name']
+                },
                 'departure_from_source': datetime.combine(travel_date, bus_departure).isoformat(),
                 'arrival_at_source': datetime.combine(travel_date, bus_arrival).isoformat(),
                 'arrived_time': datetime.combine(travel_date, ensure_time(bus_leg.get('arrived_time'))).isoformat(),
@@ -676,8 +740,14 @@ def get_multimodal_route():
             'train_leg': {
                 'train_number': train_leg['train_number'],
                 'train_name': train_leg['train_name'],
-                'from': hub['train_station_code'],
-                'to': destination['train_station_code'],
+                'from': {
+                    'station_code': hub['train_station_code'],
+                    'station_name': hub['location_name']
+                },
+                'to': {
+                    'station_code': destination['train_station_code'],
+                    'station_name': destination['location_name']
+                },
                 'departure_from_source': train_departure_dt.isoformat(),
                 'arrival_at_source': datetime.combine(travel_date, train_arrival).isoformat(),
                 'arrived_time': final_arrival_dt.isoformat(),
