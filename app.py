@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, render_template, redirect, url_for, session
+from flask import Flask, request, jsonify, render_template, redirect, url_for, session, flash
 import pymysql
 
 
@@ -56,32 +56,39 @@ def confirm_route():
     return render_template('confirm_booking.html', route=route)
 
 
-@app.route('/api/register', methods=['POST'])
+@app.route('/register', methods=['POST', 'GET'])
 def register_user():
-    data = request.get_json()
+    if request.method == 'POST':
+        if request.content_type == 'application/json':
+            data = request.get_json()
 
-    try:
-        with db.cursor() as cursor:
-            sql = """
-                INSERT INTO users (
-                    name, email, phone_number, age, password
-                ) VALUES (%s, %s, %s, %s, %s)
-            """
-            cursor.execute(sql, (
-                data['name'],
-                data['email'],
-                data['phone_number'],
-                data['age'],
-                data['password']
-            ))
-            db.commit()
-            return jsonify({'message': 'Registration successful'}), 201
+            try:
+                with db.cursor() as cursor:
+                    sql = """
+                        INSERT INTO users (
+                            name, email, phone_number, age, password
+                        ) VALUES (%s, %s, %s, %s, %s)
+                    """
+                    cursor.execute(sql, (
+                        data['name'],
+                        data['email'],
+                        data['phone_number'],
+                        data['age'],
+                        data['password']
+                    ))
+                    db.commit()
+                    return jsonify({'message': 'Registration successful'}), 201
 
-    except Exception as e:
-        print("Error:", e)
-        return jsonify({'error': 'Registration failed'}), 500
+            except Exception as e:
+                print("Error:", e)
+                return jsonify({'error': 'Registration failed'}), 500
+        else:
+            return jsonify({'error': 'Invalid content type, must be application/json'}), 415
 
-@app.route('/api/update-profile/<int:user_id>', methods=['PUT'])
+    return render_template('register.html')
+
+
+@app.route('/update-profile/<int:user_id>', methods=['PUT'])
 def update_profile(user_id):
     data = request.get_json()
 
@@ -107,12 +114,84 @@ def update_profile(user_id):
         print("Error:", e)
         return jsonify({'error': 'Profile update failed'}), 500
 
+def is_profile_complete(user_id):
+    with db.cursor(pymysql.cursors.DictCursor) as cursor:
+        cursor.execute("SELECT nationality, adhar_number, passport_number, document FROM users WHERE user_id = %s", (user_id,))
+        user = cursor.fetchone()
+        return all([user['nationality'], user['adhar_number'], user['passport_number'], user['document']])
+
+
+@app.route('/booking', methods=['GET', 'POST'])
+def booking():
+    if 'user_id' not in session:
+        flash("Please login or register before booking.")
+        return redirect('/')
+
+    # Check if profile is complete
+    user_id = session['user_id']
+    with db.cursor() as cursor:
+        cursor.execute("SELECT nationality, adhar_number, passport_number, document FROM users WHERE user_id=%s", (user_id,))
+        profile = cursor.fetchone()
+
+        if not all(profile):
+            flash("Please complete your profile before booking.")
+            return redirect('/update_profile')  # Or show a modal warning
+
+    return render_template('booking.html')
+
+    # Proceed with booking
 
 import base64
 
 @app.template_filter('b64encode')
 def b64encode_filter(s):
     return base64.b64encode(s.encode('utf-8')).decode('utf-8')
+
+
+
+@app.route('/login', methods=['POST', 'GET'])
+def login_user():
+    if request.method == 'POST':
+        # Handle both JSON (Postman) and form (HTML form) submissions
+        if request.content_type == 'application/json':
+            data = request.get_json()
+            email = data.get('email')
+            password = data.get('password')
+        else:
+            # From HTML form
+            email = request.form.get('email')
+            password = request.form.get('password')
+
+        try:
+            with db.cursor() as cursor:
+                sql = "SELECT * FROM users WHERE email = %s"
+                cursor.execute(sql, (email,))
+                user = cursor.fetchone()
+
+                if user and user['password'] == password:
+                    # If it was an API call
+                    if request.content_type == 'application/json':
+                        return jsonify({'message': 'Login successful', 'user_id': user['id']}), 200
+                    else:
+                        # If it's a browser form, redirect to home
+                        return redirect(url_for('index'))  # Assumes you have a route named `home`
+                else:
+                    error_msg = 'Invalid email or password'
+                    if request.content_type == 'application/json':
+                        return jsonify({'error': error_msg}), 401
+                    else:
+                        return render_template('login.html', error=error_msg)
+
+        except Exception as e:
+            print("Login error:", e)
+            if request.content_type == 'application/json':
+                return jsonify({'error': 'Login failed'}), 500
+            else:
+                return render_template('login.html', error="Login failed")
+
+    # GET request - show login form
+    return render_template('login.html')
+
 
 
 @app.route('/add_train', methods=['POST'])
@@ -527,29 +606,9 @@ def calculate_bus_fare():
 
         return jsonify({'error': str(e)}), 500
 
-BUS_FARE_PER_KM = {
-    'AC': 1.5,
-    'Non-AC': 1.0
-}
-TRAIN_FARE_PER_KM = {
-    'Sleeper': 0.8,
-    'General': 0.5
-}
 
-from datetime import datetime, timedelta
-
-from datetime import datetime, timedelta
-
-from flask import request, jsonify
-from datetime import datetime, timedelta
-
-
-def parse_time(t):
-    return datetime.strptime(str(t), "%H:%M:%S").time()
-
-from flask import request, jsonify
-from datetime import datetime, timedelta, time
-
+BUS_FARE_PER_KM = {'AC': 1.5, 'Non-AC': 1.0}
+TRAIN_FARE_PER_KM = {'Sleeper': 0.8, 'General': 0.5}
 
 def ensure_time(value):
     if isinstance(value, time):
@@ -563,40 +622,169 @@ def ensure_time(value):
     else:
         raise ValueError("Unsupported time value type")
 
+def calculate_bus_fare(cursor, from_station_code, to_station_code, bus_id):
+    cursor.execute("""
+        SELECT br1.distance_from_start as from_dist, br2.distance_from_start as to_dist
+        FROM bus_routes br1
+        JOIN bus_routes br2 ON br1.bus_id = br2.bus_id
+        WHERE br1.bus_id = %s AND br1.station_code = %s AND br2.station_code = %s
+    """, (bus_id, from_station_code, to_station_code))
+    distance_data = cursor.fetchone()
+    if distance_data and distance_data['from_dist'] is not None and distance_data['to_dist'] is not None:
+        distance = abs(distance_data['to_dist'] - distance_data['from_dist'])
+        return distance * BUS_FARE_PER_KM['AC'] # Assuming AC; you can make this dynamic.
+    return 0.0
 
-from flask import request, jsonify
-from datetime import datetime, timedelta
+def calculate_train_fare(cursor, from_station_code, to_station_code, train_id):
+    cursor.execute("""
+        SELECT tr1.distance_from_start as from_dist, tr2.distance_from_start as to_dist
+        FROM train_routes tr1
+        JOIN train_routes tr2 ON tr1.train_id = tr2.train_id
+        WHERE tr1.train_id = %s AND tr1.station_code = %s AND tr2.station_code = %s
+    """, (train_id, from_station_code, to_station_code))
+    distance_data = cursor.fetchone()
+    if distance_data and distance_data['from_dist'] is not None and distance_data['to_dist'] is not None:
+        distance = abs(distance_data['to_dist'] - distance_data['from_dist'])
+        return distance * TRAIN_FARE_PER_KM['Sleeper'] # Assuming Sleeper; you can make this dynamic.
+    return 0.0
 
-from flask import request, jsonify
-from datetime import datetime, timedelta, date
+def calculate_flight_fare(cursor, from_airport_code, to_airport_code, flight_id):
+    cursor.execute("""SELECT price FROM flights WHERE flight_id = %s""", (flight_id,))
+    fare_data = cursor.fetchone()
+    return float(fare_data['price']) if fare_data and fare_data['price'] is not None else 0.0
 
+def find_bus_train_flight(cursor, source, destination, hub, travel_date, options):
+    cursor.execute("""
+        SELECT br1.*, br2.*, b.* FROM bus_routes br1 JOIN bus_routes br2 ON br1.bus_id = br2.bus_id JOIN buses b ON br1.bus_id = b.bus_id WHERE br1.station_code = %s AND br2.station_code = %s AND br1.stop_number < br2.stop_number
+    """, (source['bus_station_code'], hub['bus_station_code']))
+    bus_leg = cursor.fetchone()
+    if bus_leg:
+        cursor.execute("SELECT * FROM bus_seats WHERE bus_id = %s AND travel_date = %s", (bus_leg['bus_id'], travel_date))
+        bus_seat_info = cursor.fetchone()
+        if bus_seat_info and bus_seat_info['available_seats'] > 0:
+            bus_arr_dt = datetime.combine(travel_date, ensure_time(bus_leg['arrived_time']))
+            # Train Leg
+            cursor.execute("""
+                SELECT tr1.*, tr2.*, t.* FROM train_routes tr1 JOIN train_routes tr2 ON tr1.train_id = tr2.train_id JOIN trains t ON tr1.train_id = t.train_id WHERE tr1.station_code = %s AND tr2.station_code = %s AND tr1.stop_number < tr2.stop_number
+            """, (hub['train_station_code'], destination['train_station_code']))
+            train_leg = cursor.fetchone()
+            if train_leg:
+                cursor.execute("SELECT * FROM train_seats WHERE train_id = %s AND travel_date = %s", (train_leg['train_id'], travel_date))
+                train_seat_info = cursor.fetchone()
+                if train_seat_info and train_seat_info['available_seats'] > 0:
+                    train_dep_dt = datetime.combine(travel_date, ensure_time(train_leg['departure_time']))
+                    if train_dep_dt > bus_arr_dt:
+                        bus_fare = calculate_bus_fare(cursor, source['bus_station_code'], hub['bus_station_code'], bus_leg['bus_id'])
+                        train_fare = calculate_train_fare(cursor, hub['train_station_code'], destination['train_station_code'], train_leg['train_id'])
+                        total_fare = bus_fare + train_fare
+                        final_arr_dt = datetime.combine(travel_date, ensure_time(train_leg['arrived_time']))
+                        options.append({
+                            'message': 'Multimodal route found (Bus + Train)',
+                            'via': hub['location_name'],
+                            'travel_date': str(travel_date),
+                            'transfer_wait_time_minutes': int((train_dep_dt - bus_arr_dt).total_seconds() / 60),
+                            'total_fare': f"{total_fare:.2f}",
+                            'bus_leg': {
+                                'bus_number': bus_leg['bus_number'],
+                                'bus_name': bus_leg['bus_name'],
+                                'from': {'station_code': source['bus_station_code'], 'station_name': source['location_name']},
+                                'to': {'station_code': hub['bus_station_code'], 'station_name': hub['location_name']},
+                                'departure_from_source': datetime.combine(travel_date, ensure_time(bus_leg['departure_time'])).isoformat(),
+                                'arrival_at_hub': bus_arr_dt.isoformat(),
+                                'fare': f"{bus_fare:.2f}",
+                                'available_seats': bus_seat_info['available_seats'],
+                                'max_seats': bus_seat_info['max_seats']
+                            },
+                            'train_leg': {
+                                'train_number': train_leg['train_number'],
+                                'train_name': train_leg['train_name'],
+                                'from': {'station_code': hub['train_station_code'], 'station_name': hub['location_name']},
+                                'to': {'station_code': destination['train_station_code'], 'station_name': destination['location_name']},
+                                'departure_from_hub': train_dep_dt.isoformat(),
+                                'arrival_at_destination': final_arr_dt.isoformat(),
+                                'fare': f"{train_fare:.2f}",
+                                'available_seats': train_seat_info['available_seats'],
+                                'max_seats': train_seat_info['max_seats']
+                            },
+                            'final_arrival_at_destination': final_arr_dt.isoformat()
+                        })
+            # Flight Leg
+            cursor.execute("""
+                SELECT fr1.*, fr2.*, f.* FROM flight_routes fr1 JOIN flight_routes fr2 ON fr1.flight_id = fr2.flight_id JOIN flights f ON fr1.flight_id = f.flight_id WHERE fr1.airport_code = %s AND fr2.airport_code = %s AND fr1.stop_number < fr2.stop_number
+            """, (hub['airport_code'], destination['airport_code']))
+            flight_leg = cursor.fetchone()
+            if flight_leg:
+                cursor.execute("SELECT * FROM flight_seats WHERE flight_id = %s AND travel_date = %s", (flight_leg['flight_id'], travel_date))
+                flight_seat_info = cursor.fetchone()
+                if flight_seat_info and flight_seat_info['available_seats'] > 0:
+                    flight_dep_dt = datetime.combine(travel_date, ensure_time(flight_leg['departure_time']))
+                    if flight_dep_dt > bus_arr_dt:
+                        bus_fare = calculate_bus_fare(cursor, source['bus_station_code'], hub['bus_station_code'], bus_leg['bus_id'])
+                        flight_fare = calculate_flight_fare(cursor, hub['airport_code'], destination['airport_code'], flight_leg['flight_id'])
+                        total_fare = bus_fare + flight_fare
+                        final_arr_dt = datetime.combine(travel_date, ensure_time(flight_leg['arrived_time']))
+                        options.append({
+                            'message': 'Multimodal route found (Bus + Flight)',
+                            'via': hub['location_name'],
+                            'travel_date': str(travel_date),
+                            'transfer_wait_time_minutes': int((flight_dep_dt - bus_arr_dt).total_seconds() / 60),
+                            'total_fare': f"{total_fare:.2f}",
+                            'bus_leg': {
+                                'bus_number': bus_leg['bus_number'],
+                                'bus_name': bus_leg['bus_name'],
+                                'from': {'station_code': source['bus_station_code'], 'station_name': source['location_name']},
+                                'to': {'station_code': hub['bus_station_code'], 'station_name': hub['location_name']},
+                                'departure_from_source': datetime.combine(travel_date, ensure_time(bus_leg['departure_time'])).isoformat(),
+                                'arrival_at_hub': bus_arr_dt.isoformat(),
+                                'fare': f"{bus_fare:.2f}",
+                                'available_seats': bus_seat_info['available_seats'],
+                                'max_seats': bus_seat_info['max_seats']
+                            },
+                            'flight_leg': {
+                                'flight_number': flight_leg['flight_number'],
+                                'airline_name': flight_leg['airline_name'],
+                                'from': {'airport_code': hub['airport_code'], 'airport_name': hub['location_name']},
+                                'to': {'airport_code': destination['airport_code'], 'airport_name': destination['location_name']},
+                                'departure_from_hub': flight_dep_dt.isoformat(),
+                                'arrival_at_destination': final_arr_dt.isoformat(),
+                                'fare': f"{flight_fare:.2f}",
+                                'available_seats': flight_seat_info['available_seats'],
+                                'max_seats': flight_seat_info['max_seats']
+                            },
+                            'final_arrival_at_destination': final_arr_dt.isoformat()
+                        })
+
+def find_train_bus_flight(cursor, source, destination, hub, travel_date, options):
+  # Add similar logic for Train -> Bus/Flight here.
+    pass
+
+def find_flight_bus_train(cursor, source, destination, hub, travel_date, options):
+  # Add similar logic for Flight -> Bus/Train here.
+    pass
 
 @app.route('/multi_mode_route', methods=['POST'])
 def get_multimodal_route():
     data = request.get_json()
     source_name = data.get('source')
     destination_name = data.get('destination')
-    travel_date_str = data.get('travel_date')  # Format: 'YYYY-MM-DD'
+    travel_date_str = data.get('travel_date')
 
     try:
         travel_date = datetime.strptime(travel_date_str, "%Y-%m-%d").date() if travel_date_str else datetime.today().date()
     except ValueError:
-        return jsonify({'message': 'Invalid travel_date format. Use YYYY-MM-DD.'}), 400
+        return jsonify({'message': 'Invalid travel_date format. UseErrorf-MM-DD.'}), 400
 
     cursor = db.cursor(pymysql.cursors.DictCursor)
-
-    # Fetch unified location entries
     cursor.execute("SELECT * FROM unified_locations WHERE location_name = %s", (source_name,))
     source = cursor.fetchone()
     cursor.execute("SELECT * FROM unified_locations WHERE location_name = %s", (destination_name,))
     destination = cursor.fetchone()
-
     if not source or not destination:
         return jsonify({'message': 'Source or destination not found'}), 404
 
     options = []
 
-    # --------- Option 1: Direct Bus Route ---------
+    # ========== Direct Bus ==========
     cursor.execute("""
         SELECT br1.*, br2.*, b.*
         FROM bus_routes br1
@@ -604,246 +792,133 @@ def get_multimodal_route():
         JOIN buses b ON br1.bus_id = b.bus_id
         WHERE br1.station_code = %s AND br2.station_code = %s AND br1.stop_number < br2.stop_number
     """, (source['bus_station_code'], destination['bus_station_code']))
-    bus_direct_routes = cursor.fetchall()
-
-    for route in bus_direct_routes:
-        dep_time = ensure_time(route['departure_time'])
-        arr_time = ensure_time(route['arrival_time'])
-        arrived_time = ensure_time(route.get('arrived_time'))
-
-        dep_datetime = datetime.combine(travel_date, dep_time)
-        arr_datetime = datetime.combine(travel_date, arrived_time)
-
-        option = {
-            'message': 'Direct bus route found',
-            'via': None,
-            'travel_date': str(travel_date),
-            'total_fare': None,
-            'transfer_wait_time_minutes': 0,
-            'bus_leg': {
-                'bus_number': route['bus_number'],
-                'bus_name': route['bus_name'],
-                'from': {
-                    'station_code': source['bus_station_code'],
-                    'station_name': source['location_name']
+    direct_bus = cursor.fetchone()
+    if direct_bus:
+        cursor.execute("SELECT * FROM bus_seats WHERE bus_id = %s AND travel_date = %s",
+                       (direct_bus['bus_id'], travel_date))
+        bus_seat_info = cursor.fetchone()
+        if bus_seat_info and bus_seat_info['available_seats'] > 0:
+            bus_fare = calculate_bus_fare(cursor, source['bus_station_code'], destination['bus_station_code'], direct_bus['bus_id'])
+            departure_datetime = datetime.combine(travel_date, ensure_time(direct_bus['departure_time']))
+            arrival_datetime = datetime.combine(travel_date, ensure_time(direct_bus['arrived_time']))
+            if arrival_datetime < departure_datetime:
+                arrival_datetime = datetime.combine(travel_date + timedelta(days=1), ensure_time(direct_bus['arrived_time']))
+            options.append({
+                'message': 'Direct Bus route found',
+                'travel_date': str(travel_date),
+                'total_fare': f"{bus_fare:.2f}",
+                'bus_leg': {
+                    'bus_number': direct_bus['bus_number'],
+                    'bus_name': direct_bus['bus_name'],
+                    'from': {'station_code': source['bus_station_code'], 'station_name': source['location_name']},
+                    'to': {'station_code': destination['bus_station_code'], 'station_name': destination['location_name']},
+                    'departure_from_source': departure_datetime.isoformat(),
+                    'arrival_at_destination': arrival_datetime.isoformat(), # Corrected line
+                    'fare': f"{bus_fare:.2f}",
+                    'available_seats': bus_seat_info['available_seats'],
+                    'max_seats': bus_seat_info['max_seats']
                 },
-                'to': {
-                    'station_code': destination['bus_station_code'],
-                    'station_name': destination['location_name']
+                'final_arrival_at_destination': arrival_datetime.isoformat()
+            })
+
+    # ========== Direct Train ==========
+    cursor.execute("""
+        SELECT tr1.*, tr2.*, t.*
+        FROM train_routes tr1
+        JOIN train_routes tr2 ON tr1.train_id = tr2.train_id
+        JOIN trains t ON tr1.train_id = t.train_id
+        WHERE tr1.station_code = %s AND tr2.station_code = %s AND tr1.stop_number < tr2.stop_number
+    """, (source['train_station_code'], destination['train_station_code']))
+    direct_train = cursor.fetchone()
+    if direct_train:
+        cursor.execute("SELECT * FROM train_seats WHERE train_id = %s AND travel_date = %s",
+                       (direct_train['train_id'], travel_date))
+        train_seat_info = cursor.fetchone()
+        if train_seat_info and train_seat_info['available_seats'] > 0:
+            train_fare = calculate_train_fare(cursor, source['train_station_code'], destination['train_station_code'], direct_train['train_id'])
+            departure_datetime = datetime.combine(travel_date, ensure_time(direct_train['departure_time']))
+            arrival_datetime = datetime.combine(travel_date, ensure_time(direct_train['arrived_time']))
+            if arrival_datetime < departure_datetime:
+                arrival_datetime = datetime.combine(travel_date + timedelta(days=1), ensure_time(direct_train['arrived_time']))
+            options.append({
+                'message': 'Direct Train route found',
+                'travel_date': str(travel_date),
+                'total_fare': f"{train_fare:.2f}",
+                'train_leg': {
+                    'train_number': direct_train['train_number'],
+                    'train_name': direct_train['train_name'],
+                    'from': {'station_code': source['train_station_code'], 'station_name': source['location_name']},
+                    'to': {'station_code': destination['train_station_code'], 'station_name': destination['location_name']},
+                    'departure_from_source': departure_datetime.isoformat(),
+                    'arrival_at_destination': arrival_datetime.isoformat(),
+                    'fare': f"{train_fare:.2f}",
+                    'available_seats': train_seat_info['available_seats'],
+                    'max_seats': train_seat_info['max_seats']
                 },
-                'departure_from_source': dep_datetime.isoformat(),
-                'arrival_at_source': datetime.combine(travel_date, arr_time).isoformat(),
-                'arrived_time': arr_datetime.isoformat()
-            },
-            'final_arrival_at_destination': arr_datetime.isoformat()
-        }
+                'final_arrival_at_destination': arrival_datetime.isoformat()
+            })
 
-        cursor.execute("""
-            SELECT fare FROM fares 
-            WHERE mode = 'bus' AND from_station_code = %s AND to_station_code = %s
-        """, (source['bus_station_code'], destination['bus_station_code']))
-        fare = cursor.fetchone()
-        if fare:
-            option['bus_leg']['fare'] = f"{float(fare['fare']):.2f}"
-            option['total_fare'] = f"{float(fare['fare']):.2f}"
-        else:
-            option['bus_leg']['fare'] = "0.00"
-            option['total_fare'] = "0.00"
+    # ========== Direct Flight ==========
+    cursor.execute("""
+        SELECT fr1.*, fr2.*, f.*
+        FROM flight_routes fr1
+        JOIN flight_routes fr2 ON fr1.flight_id = fr2.flight_id
+        JOIN flights f ON fr1.flight_id = f.flight_id
+        WHERE fr1.airport_code = %s AND fr2.airport_code = %s AND fr1.stop_number < fr2.stop_number
+    """, (source['airport_code'], destination['airport_code']))
+    direct_flight = cursor.fetchone()
+    if direct_flight:
+        cursor.execute("SELECT * FROM flight_seats WHERE flight_id = %s AND travel_date = %s",
+                       (direct_flight['flight_id'], travel_date))
+        flight_seat_info = cursor.fetchone()
+        if flight_seat_info and flight_seat_info['available_seats'] > 0:
+            flight_fare = calculate_flight_fare(cursor, source['airport_code'], destination['airport_code'], direct_flight['flight_id'])
+            departure_datetime = datetime.combine(travel_date, ensure_time(direct_flight['departure_time']))
+            arrival_datetime = datetime.combine(travel_date, ensure_time(direct_flight['arrived_time']))
+            if arrival_datetime < departure_datetime:
+                arrival_datetime = datetime.combine(travel_date + timedelta(days=1), ensure_time(direct_flight['arrived_time']))
+            options.append({
+                'message': 'Direct Flight route found',
+                'travel_date': str(travel_date),
+                'total_fare': f"{flight_fare:.2f}",
+                'flight_leg': {
+                    'flight_number': direct_flight['flight_number'],
+                    'airline_name': direct_flight['airline_name'],
+                    'from': {'airport_code': source['airport_code'], 'airport_name': source['location_name']},
+                    'to': {'airport_code': destination['airport_code'], 'airport_name': destination['location_name']},
+                    'departure_from_source': departure_datetime.isoformat(),
+                    'arrival_at_destination': arrival_datetime.isoformat(),
+                    'fare': f"{flight_fare:.2f}",
+                    'available_seats': flight_seat_info['available_seats'],
+                    'max_seats': flight_seat_info['max_seats']
+                },
+                'final_arrival_at_destination': arrival_datetime.isoformat()
+            })
 
-        options.append(option)
-
-    # --------- Option 2: Multimodal (Bus + Train via Hubs) ---------
+    # ========== Multimodal Routes ==========
     cursor.execute("SELECT * FROM unified_locations")
     all_locations = cursor.fetchall()
-
     for hub in all_locations:
         if hub['location_name'] in [source_name, destination_name]:
             continue
-
-        # Get bus leg
-        cursor.execute("""
-            SELECT br1.*, br2.*, b.*
-            FROM bus_routes br1
-            JOIN bus_routes br2 ON br1.bus_id = br2.bus_id
-            JOIN buses b ON br1.bus_id = b.bus_id
-            WHERE br1.station_code = %s AND br2.station_code = %s AND br1.stop_number < br2.stop_number
-        """, (source['bus_station_code'], hub['bus_station_code']))
-        bus_leg = cursor.fetchone()
-
-        # Get train leg
-        cursor.execute("""
-            SELECT tr1.*, tr2.*, t.*
-            FROM train_routes tr1
-            JOIN train_routes tr2 ON tr1.train_id = tr2.train_id
-            JOIN trains t ON tr1.train_id = t.train_id
-            WHERE tr1.station_code = %s AND tr2.station_code = %s AND tr1.stop_number < tr2.stop_number
-        """, (hub['train_station_code'], destination['train_station_code']))
-        train_leg = cursor.fetchone()
-
-        if not bus_leg or not train_leg:
-            continue
-
-        bus_arrival = ensure_time(bus_leg['arrival_time'])
-        bus_departure = ensure_time(bus_leg['departure_time'])
-        train_arrival = ensure_time(train_leg['arrival_time'])
-        train_departure = ensure_time(train_leg['departure_time'])
-
-        bus_arrival_dt = datetime.combine(travel_date, bus_arrival)
-        train_departure_dt = datetime.combine(travel_date, train_departure)
-
-        if train_departure_dt <= bus_arrival_dt:
-            continue
-
-        transfer_wait_minutes = int((train_departure_dt - bus_arrival_dt).total_seconds() / 60)
-
-        # Fares
-        cursor.execute("""
-            SELECT fare FROM fares 
-            WHERE mode = 'bus' AND from_station_code = %s AND to_station_code = %s
-        """, (source['bus_station_code'], hub['bus_station_code']))
-        bus_fare_row = cursor.fetchone()
-        bus_fare = float(bus_fare_row['fare']) if bus_fare_row else 0.0
-
-        cursor.execute("""
-            SELECT fare FROM fares 
-            WHERE mode = 'train' AND from_station_code = %s AND to_station_code = %s
-        """, (hub['train_station_code'], destination['train_station_code']))
-        train_fare_row = cursor.fetchone()
-        train_fare = float(train_fare_row['fare']) if train_fare_row else 0.0
-
-        total_fare = bus_fare + train_fare
-        final_arrived_time = ensure_time(train_leg.get('arrived_time'))
-        final_arrival_dt = datetime.combine(travel_date, final_arrived_time)
-
-        option = {
-            'message': 'Multimodal route found',
-            'via': hub['location_name'],
-            'travel_date': str(travel_date),
-            'transfer_wait_time_minutes': transfer_wait_minutes,
-            'total_fare': f"{total_fare:.2f}",
-            'bus_leg': {
-                'bus_number': bus_leg['bus_number'],
-                'bus_name': bus_leg['bus_name'],
-                'from': {
-                    'station_code': source['bus_station_code'],
-                    'station_name': source['location_name']
-                },
-                'to': {
-                    'station_code': hub['bus_station_code'],
-                    'station_name': hub['location_name']
-                },
-                'departure_from_source': datetime.combine(travel_date, bus_departure).isoformat(),
-                'arrival_at_source': datetime.combine(travel_date, bus_arrival).isoformat(),
-                'arrived_time': datetime.combine(travel_date, ensure_time(bus_leg.get('arrived_time'))).isoformat(),
-                'fare': f"{bus_fare:.2f}"
-            },
-            'train_leg': {
-                'train_number': train_leg['train_number'],
-                'train_name': train_leg['train_name'],
-                'from': {
-                    'station_code': hub['train_station_code'],
-                    'station_name': hub['location_name']
-                },
-                'to': {
-                    'station_code': destination['train_station_code'],
-                    'station_name': destination['location_name']
-                },
-                'departure_from_source': train_departure_dt.isoformat(),
-                'arrival_at_source': datetime.combine(travel_date, train_arrival).isoformat(),
-                'arrived_time': final_arrival_dt.isoformat(),
-                'fare': f"{train_fare:.2f}"
-            },
-            'final_arrival_at_destination': final_arrival_dt.isoformat()
-        }
-
-        options.append(option)
+        find_bus_train_flight(cursor, source, destination, hub, travel_date, options)
+        find_train_bus_flight(cursor, source, destination, hub, travel_date, options)
+        find_flight_bus_train(cursor, source, destination, hub, travel_date, options)
 
     if not options:
         return jsonify({'message': 'No route found'}), 404
 
-    # ----- Tag fastest and affordable -----
-    min_transfer_wait = min(opt['transfer_wait_time_minutes'] for opt in options)
-    min_total_fare = min(float(opt['total_fare']) for opt in options)
+    min_transfer = min(opt['transfer_wait_time_minutes'] for opt in options if 'transfer_wait_time_minutes' in opt) if any('transfer_wait_time_minutes' in opt for opt in options) else 0
+    min_fare = min(float(opt['total_fare']) for opt in options) if options else 0
 
     for opt in options:
-        opt['type'] = []
-        if opt['transfer_wait_time_minutes'] == min_transfer_wait:
+        opt['type'] = []  # Initialize as an empty list
+        if 'transfer_wait_time_minutes' in opt and opt['transfer_wait_time_minutes'] == min_transfer:
             opt['type'].append('fastest')
-        if float(opt['total_fare']) == min_total_fare:
+        if float(opt['total_fare']) == min_fare:
             opt['type'].append('affordable')
 
     return jsonify({'options': options})
-
-
-
-@app.route("/api/cab", methods=["POST"])
-def add_cab():
-    data = request.json
-    try:
-        with db.cursor() as cursor:
-            sql = """INSERT INTO cabs (cab_id, cab_number, driver_name, cab_type, seater, email, phone_number, region, password)
-                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"""
-            cursor.execute(sql, (
-                data["cab_id"], data["cab_number"], data["driver_name"], data["cab_type"],
-                data["seater"], data["email"], data["phone_number"], data["region"], data["password"]
-            ))
-            db.commit()
-            return jsonify({"message": "Cab added successfully"})
-    except Exception as e:
-        return jsonify({"error": str(e)})
-
-
-@app.route("/api/book-passenger", methods=["POST"])
-def book_passenger():
-    data = request.json
-    try:
-        with db.cursor() as cursor:
-            # Step 1: Check wallet balance
-            cursor.execute("SELECT wallet_balance FROM users WHERE user_id = %s", (data["user_id"],))
-            wallet = cursor.fetchone()
-
-            if wallet is None:
-                return jsonify({"error": "User not found"}), 404
-
-            if data.get("deduct_from_wallet"):
-                if wallet["wallet_balance"] < data["price"]:
-                    return jsonify({"error": "Insufficient wallet balance"}), 400
-
-            # Step 2: Insert passenger booking
-            sql = """
-                INSERT INTO passengers (
-                    user_id, mode, name, age, gender,
-                    journey_date, source, destination, price
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """
-
-            cursor.execute(sql, (
-                data["user_id"],
-                data["mode"],
-                data["name"],
-                data["age"],
-                data["gender"],
-                data["journey_date"],
-                data["source"],
-                data["destination"],
-                data["price"]
-            ))
-
-            # Get the auto-incremented booking_id
-            booking_id = cursor.lastrowid
-
-            # Step 3: Deduct wallet balance (if requested)
-            if data.get("deduct_from_wallet"):
-                cursor.execute(
-                    "UPDATE users SET wallet_balance = wallet_balance - %s WHERE user_id = %s",
-                    (data["price"], data["user_id"])
-                )
-
-            db.commit()
-            return jsonify({"message": "Passenger booked successfully", "booking_id": booking_id}), 201
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/journey-segment", methods=["POST"])

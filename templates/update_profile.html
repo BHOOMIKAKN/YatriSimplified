@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Update Profile | YatriSimplified</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #f6f9fc;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+    }
+
+    .profile-container {
+      background: white;
+      padding: 30px;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+      width: 400px;
+    }
+
+    .profile-container h2 {
+      margin-bottom: 20px;
+      color: #333;
+    }
+
+    input[type="text"], input[type="number"], textarea {
+      width: 100%;
+      padding: 10px;
+      margin: 10px 0;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+    }
+
+    button {
+      background-color: #28a745;
+      color: white;
+      padding: 10px;
+      width: 100%;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 16px;
+    }
+
+    button:hover {
+      background-color: #1c7c37;
+    }
+
+    .message {
+      margin-top: 15px;
+      font-weight: bold;
+      color: green;
+    }
+
+    .error {
+      color: red;
+    }
+  </style>
+</head>
+<body>
+
+<div class="profile-container">
+  <h2>Update Profile</h2>
+  <form id="profileForm">
+    <input type="text" id="nationality" placeholder="Nationality" />
+    <input type="text" id="aadhaar" placeholder="Aadhaar Number" />
+    <input type="text" id="passport" placeholder="Passport Number" />
+    <textarea id="document" placeholder="Document or Note"></textarea>
+    <input type="number" id="wallet" placeholder="Wallet Balance (₹)" />
+    <button type="submit">Update Profile</button>
+    <div class="message" id="responseMsg"></div>
+  </form>
+</div>
+
+<script>
+  // You can store the user_id in localStorage after login or registration
+  const userId = localStorage.getItem("user_id");
+
+  const form = document.getElementById('profileForm');
+  const responseMsg = document.getElementById('responseMsg');
+
+  form.addEventListener('submit', async function(e) {
+    e.preventDefault();
+
+    if (!userId) {
+      responseMsg.innerText = 'User not logged in.';
+      responseMsg.classList.add('error');
+      return;
+    }
+
+    const data = {
+      nationality: document.getElementById('nationality').value || null,
+      adhar_number: document.getElementById('aadhaar').value || null,
+      passport_number: document.getElementById('passport').value || null,
+      document: document.getElementById('document').value || null,
+      wallet_balance: parseFloat(document.getElementById('wallet').value || 0)
+    };
+
+    try {
+      const res = await fetch(`/update-profile/${userId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data)
+      });
+
+      const result = await res.json();
+
+      if (res.status === 200) {
+        responseMsg.innerText = result.message;
+        responseMsg.classList.remove('error');
+        form.reset();
+      } else {
+        responseMsg.innerText = result.error || 'Update failed';
+        responseMsg.classList.add('error');
+      }
+    } catch (err) {
+      responseMsg.innerText = 'An error occurred';
+      responseMsg.classList.add('error');
+    }
+  });
+</script>
+
+</body>
+</html>
